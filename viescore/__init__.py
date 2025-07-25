@@ -1,11 +1,8 @@
-import sys
-sys.path.insert(0, 'viescore')
-
-from utils import (
+from .utils import (
     mllm_output_to_dict
 )
 import math
-import vie_prompts
+from . import vie_prompts
 
 class VIEScore:
     def __init__(self, backbone="gpt4o", task="t2i", key_path=None) -> None:
@@ -16,23 +13,26 @@ class VIEScore:
             raise ValueError("task must be either 't2i' or 'tie'")
 
         if self.backbone_name == "gpt4o":
-            from mllm_tools.openai import GPT4o
+            from .mllm_tools.openai import GPT4o
             self.model = GPT4o(key_path)
         elif self.backbone_name == "gpt4v":
-            from mllm_tools.openai import GPT4v
+            from .mllm_tools.openai import GPT4v
             self.model = GPT4v(key_path)
         elif self.backbone_name == "gemini":
-            from mllm_tools.gemini import Gemini
+            from .mllm_tools.gemini import Gemini
             self.model = Gemini()
         elif self.backbone_name == "idefics2":
-            from mllm_tools.idefics2_eval import Idefics2
+            from .mllm_tools.idefics2_eval import Idefics2
             self.model = Idefics2()
         elif self.backbone_name == "mantis":
-            from mllm_tools.mantis_idefics2_eval import Mantis
+            from .mllm_tools.mantis_idefics2_eval import Mantis
             self.model = Mantis()
         elif self.backbone_name == "minicpmv":
-            from mllm_tools.minicpmv_eval import MiniCPMV
+            from .mllm_tools.minicpmv_eval import MiniCPMV
             self.model = MiniCPMV()
+        elif self.backbone_name == "qwenvl":
+            from .mllm_tools.qwenvl import QwenVL
+            self.model = QwenVL()
         else:
             raise NotImplementedError("backbone not supported")
         self.context = vie_prompts._context_no_delimit
