@@ -2,14 +2,16 @@ import requests
 import base64
 import os
 import mimetypes
+import io
 from typing import List, Dict, Any
+from PIL import Image
 
 class QwenVL():
     def __init__(self, api_url: str = "http://192.168.5.101:10001/v1/chat/completions", model_name: str = "Qwen/Qwen2.5-VL-32B-Instruct") -> None:
         """
         通过 VLLM 部署的 OpenAI 兼容 API 与 Qwen-VL 模型进行交互。
 
-        requires: pip install requests
+        requires: pip install requests pillow
         Args:
             api_url (str): VLLM 聊天补全端点的 URL。
             model_name (str): API 请求中要使用的模型名称。
@@ -17,19 +19,65 @@ class QwenVL():
         self.api_url = api_url
         self.model_name = model_name
 
+    def _resize_image_if_needed(self, image_path: str, max_size: int = 1280) -> bytes:
+        """
+        如果图片的最长边超过指定大小，则缩放图片。
+        
+        Args:
+            image_path (str): 图片文件路径
+            max_size (int): 最长边的最大像素数，默认为1280
+            
+        Returns:
+            bytes: 处理后的图片字节数据
+        """
+        with Image.open(image_path) as img:
+            # 获取原始尺寸
+            width, height = img.size
+            max_dimension = max(width, height)
+            
+            # 如果最长边超过限制，则按比例缩放
+            if max_dimension > max_size:
+                # 计算缩放比例
+                scale = max_size / max_dimension
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                
+                # 缩放图片
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # 确保图片为RGB模式（某些图片可能是RGBA或其他模式）
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # 将图片保存到字节流中
+            img_bytes = io.BytesIO()
+            img.save(img_bytes, format='JPEG', quality=85)
+            img_bytes.seek(0)
+            
+            return img_bytes.getvalue()
+
     def _encode_image_to_data_uri(self, image_path: str) -> str:
-        """将本地图像文件编码为 data URI。"""
+        """将本地图像文件编码为 data URI，如果需要会先缩放图片。"""
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"在路径 {image_path} 未找到图像文件")
 
-        mime_type, _ = mimetypes.guess_type(image_path)
-        if not mime_type or not mime_type.startswith('image'):
-            mime_type = 'image/jpeg'  # 如果无法确定，则默认为 jpeg
+        # 使用PIL处理并缩放图片
+        try:
+            image_bytes = self._resize_image_if_needed(image_path)
+            encoded_string = base64.b64encode(image_bytes).decode('utf-8')
+            # 处理后的图片总是JPEG格式
+            return f"data:image/jpeg;base64,{encoded_string}"
+        except Exception as e:
+            # 如果PIL处理失败，回退到原始方法
+            print(f"警告: PIL处理图片失败 ({e})，使用原始方法")
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type or not mime_type.startswith('image'):
+                mime_type = 'image/jpeg'  # 如果无法确定，则默认为 jpeg
 
-        with open(image_path, "rb") as image_file:
-            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-        
-        return f"data:{mime_type};base64,{encoded_string}"
+            with open(image_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            return f"data:{mime_type};base64,{encoded_string}"
 
     def prepare_prompt(self, image_links: List[str] = [], text_prompt: str = "") -> List[Dict[str, Any]]:
         """

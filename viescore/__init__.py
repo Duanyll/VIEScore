@@ -1,3 +1,5 @@
+# viescore/__init__.py
+
 from .utils import (
     mllm_output_to_dict
 )
@@ -10,8 +12,9 @@ class VIEScore:
         self.backbone_name = backbone
 
         if self.task not in ["t2i", "tie", "t2v"]:
-            raise ValueError("task must be either 't2i' or 'tie'")
+            raise ValueError("task must be either 't2i', 'tie', or 't2v'")
 
+        # --- Model initialization (no changes here) ---
         if self.backbone_name == "gpt4o":
             from .mllm_tools.openai import GPT4o
             self.model = GPT4o(key_path)
@@ -35,6 +38,8 @@ class VIEScore:
             self.model = QwenVL()
         else:
             raise NotImplementedError("backbone not supported")
+        
+        # --- Prompt preparation (no changes here) ---
         self.context = vie_prompts._context_no_delimit
         if self.task == "t2i":
             self.SC_prompt = "\n".join([self.context, vie_prompts._prompts_0shot_one_image_gen_rule, vie_prompts._prompts_0shot_t2i_rule_SC])
@@ -45,68 +50,66 @@ class VIEScore:
         elif self.task == "t2v":
             self.SC_prompt = "\n".join([self.context, vie_prompts._prompts_0shot_one_video_gen_rule, vie_prompts._prompts_0shot_t2v_rule_SC])
             self.PQ_prompt = "\n".join([self.context, vie_prompts._prompts_0shot_t2v_rule_PQ])
-
-    def evaluate(self, image_prompts, text_prompt, extract_overall_score_only=False, extract_all_score=True, echo_output=False):
+    
+    def _prepare_for_mllm(self, image_prompts):
+        """Prepares image prompts for MLLM, handling url vs local path."""
         if not isinstance(image_prompts, list):
             image_prompts = [image_prompts]
         if self.backbone_name in ['gpt4o', 'gpt4v']:
             self.model.use_encode = False if isinstance(image_prompts[0], str) else True
-            #print("Using encode:", self.model.use_encode)
-        if self.task == "t2i":
+        return image_prompts
+
+    def _get_parsed_dict(self, prompt):
+        """Helper to get and parse MLLM output with retry logic."""
+        parsed_dict = False
+        tries = 0
+        max_tries = 1
+        while parsed_dict is False:
+            tries += 1
+            guess_if_cannot_parse = tries > max_tries
+            result = self.model.get_parsed_output(prompt)
+            parsed_dict = mllm_output_to_dict(result, give_up_parsing=guess_if_cannot_parse)
+        
+        if parsed_dict == "rate_limit_exceeded":
+            print("rate_limit_exceeded") 
+            raise ValueError("rate_limit_exceeded")
+        return parsed_dict
+
+    def evaluate_sc(self, image_prompts, text_prompt):
+        """
+        [NEW] Evaluates ONLY the SC (Semantic Consistency) score.
+        """
+        image_prompts = self._prepare_for_mllm(image_prompts)
+        if self.task in ["t2i", "t2v"]:
             _SC_prompt = self.SC_prompt.replace("<prompt>", text_prompt)
         elif self.task == "tie":
             _SC_prompt = self.SC_prompt.replace("<instruction>", text_prompt)
-        elif self.task == "t2v":
-            _SC_prompt = self.SC_prompt.replace("<prompt>", text_prompt)
+        
         SC_prompt_final = self.model.prepare_prompt(image_prompts, _SC_prompt)
+        return self._get_parsed_dict(SC_prompt_final)
+
+    def evaluate_pq(self, image_prompts):
+        """
+        [NEW] Evaluates ONLY the PQ (Perceptual Quality) score.
+        """
+        image_prompts = self._prepare_for_mllm(image_prompts)
+        PQ_prompt_final = self.model.prepare_prompt(image_prompts, self.PQ_prompt)
+        return self._get_parsed_dict(PQ_prompt_final)
+
+    def evaluate(self, image_prompts, text_prompt):
+        """
+        [MODIFIED] Main evaluation method.
+        Now calls sc and pq methods and returns a dictionary with full details.
+        """
+        # 1. Evaluate SC
+        SC_dict = self.evaluate_sc(image_prompts, text_prompt)
+
+        # 2. Evaluate PQ
+        # For TIE task, PQ is evaluated only on the final generated image
         if self.task == "tie":
-            PQ_prompt_final = self.model.prepare_prompt(image_prompts[-1], self.PQ_prompt)
+            pq_image_prompts = image_prompts[-1] if isinstance(image_prompts, list) else image_prompts
         else:
-            PQ_prompt_final = self.model.prepare_prompt(image_prompts, self.PQ_prompt)
+            pq_image_prompts = image_prompts
+        PQ_dict = self.evaluate_pq(pq_image_prompts)
 
-        results_dict = {}
-
-        SC_dict = False
-        PQ_dict = False
-        tries = 0
-        max_tries = 1
-        while SC_dict is False or PQ_dict is False:
-            tries += 1
-            guess_if_cannot_parse = True if tries > max_tries else False
-            result_SC = self.model.get_parsed_output(SC_prompt_final)
-            result_PQ = self.model.get_parsed_output(PQ_prompt_final)
-            SC_dict = mllm_output_to_dict(result_SC, give_up_parsing=guess_if_cannot_parse)
-            PQ_dict = mllm_output_to_dict(result_PQ, give_up_parsing=guess_if_cannot_parse)
-
-        if SC_dict == "rate_limit_exceeded" or PQ_dict == "rate_limit_exceeded":
-            print("rate_limit_exceeded") 
-            raise ValueError("rate_limit_exceeded")
-        results_dict['SC'] = SC_dict
-        results_dict['PQ'] = PQ_dict
-        if echo_output:
-            print("results_dict", results_dict)
-        if extract_all_score:
-            SC_score = min(results_dict['SC']['score'])
-            PQ_score = min(results_dict['PQ']['score'])
-            O_score = math.sqrt(SC_score * PQ_score)
-            return [SC_score, PQ_score, O_score]
-        if extract_overall_score_only:
-            SC_scores = results_dict['SC']['score']
-            PQ_scores = results_dict['PQ']['score']
-            O_score = math.sqrt(min(SC_scores) * min(PQ_scores))
-            return O_score
-        return results_dict
-
-if __name__ == "__main__":
-    model = VIEScore(backbone="gemini", task="t2i")
-    from datasets import load_dataset
-    dataset = load_dataset("TIGER-Lab/GenAI-Arena-Bench", "image_generation")
-    dataset = dataset["test"]
-    print("Now running the VIEScore model")
-    for idx in range(5):
-        left_image = dataset['left_image'][idx]
-        right_image = dataset['right_image'][idx]
-        prompt = dataset['prompt'][idx]
-        print(model.evaluate(left_image, prompt, extract_all_score=True))
-        print(model.evaluate(right_image, prompt, extract_all_score=True))
-
+        return {"SC": SC_dict, "PQ": PQ_dict}
